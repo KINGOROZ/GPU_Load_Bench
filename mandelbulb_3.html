@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Fractal Explorer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none;
+               font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas.drag { cursor: grabbing; }
+
+  #panel {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    background: rgba(12,14,20,0.72); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.10); border-radius: 12px;
+    padding: 12px 12px 10px; color: #dfe4ee; width: 224px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45); user-select: none;
+  }
+  #panel h1 { font-size: 12px; letter-spacing: .12em; margin: 0 0 10px;
+              color: #9aa4b8; font-weight: 600; text-transform: uppercase;
+              display: flex; justify-content: space-between; align-items: center; }
+  #hide { cursor: pointer; color: #6b7488; font-size: 14px; line-height: 1; }
+  #hide:hover { color: #cfd6e4; }
+  .label { font-size: 10px; letter-spacing: .1em; color: #7b8498;
+           text-transform: uppercase; margin: 0 0 6px; }
+  .seg { display: grid; gap: 5px; margin-bottom: 12px; }
+  #object { grid-template-columns: 1fr 1fr 1fr; }
+  #quality { grid-template-columns: 1fr 1fr; }
+  .btn { font-size: 11px; padding: 6px 4px; text-align: center; cursor: pointer;
+         border-radius: 7px; border: 1px solid rgba(255,255,255,0.08);
+         background: rgba(255,255,255,0.03); color: #aeb6c7; transition: all .12s; }
+  .btn:hover { background: rgba(255,255,255,0.08); }
+  .btn.active { background: linear-gradient(135deg,#3b6ef5,#7a4bf0); color: #fff;
+                border-color: transparent; font-weight: 600; }
+  .btn.extreme.active { background: linear-gradient(135deg,#f5453b,#f0a24b); }
+
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .row:last-of-type { margin-bottom: 0; }
+  .t-txt { font-size: 11px; color: #cfd6e4; font-weight: 600; }
+  .t-sub { font-size: 9px; color: #6b7488; margin-top: 2px; line-height: 1.35; }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; cursor: pointer; border-radius: 22px;
+            background: rgba(255,255,255,0.14); transition: .18s; }
+  .slider:before { content: ""; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px;
+                   background: #fff; border-radius: 50%; transition: .18s; }
+  input:checked + .slider { background: linear-gradient(135deg,#22c55e,#16a34a); }
+  input:checked + .slider:before { transform: translateX(18px); }
+
+  #fps { margin-top: 11px; font-size: 10px; color: #6b7488; letter-spacing: .05em;
+         display: flex; justify-content: space-between; }
+  #fps b { color: #aeb6c7; font-weight: 600; }
+  #show { position: fixed; top: 12px; left: 12px; z-index: 10; display: none;
+          background: rgba(12,14,20,0.72); backdrop-filter: blur(10px); cursor: pointer;
+          border: 1px solid rgba(255,255,255,0.10); border-radius: 10px;
+          padding: 8px 10px; color: #9aa4b8; font-size: 14px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="panel">
+  <h1>Fractal <span id="hide">–</span></h1>
+  <div class="label">Object</div>
+  <div id="object" class="seg"></div>
+  <div class="label">GPU Load</div>
+  <div id="quality" class="seg"></div>
+  <div class="row">
+    <div>
+      <div class="t-txt">Auto-rotate</div>
+      <div class="t-sub">spins when idle; drag anytime</div>
+    </div>
+    <label class="switch"><input type="checkbox" id="rot" checked><span class="slider"></span></label>
+  </div>
+  <div class="row">
+    <div>
+      <div class="t-txt">Reflections</div>
+      <div class="t-sub">extra ray-bounce pass (heavy)</div>
+    </div>
+    <label class="switch"><input type="checkbox" id="refl"><span class="slider"></span></label>
+  </div>
+  <div id="fps"><span>FPS <b id="fpsv">–</b></span><span id="loadv"></span></div>
+</div>
+<div id="show">⚙</div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
+if (!gl) { document.body.innerHTML = '<p style="color:#fff;padding:2rem">WebGL not supported.</p>'; }
+
+const VERT = `
+attribute vec2 a_pos;
+void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }
+`;
+
+const FRAG = `
+precision highp float;
+uniform vec2  u_res;
+uniform float u_dist;
+uniform float u_yaw;
+uniform float u_pitch;
+
+#define STEPS __STEPS__
+#define BISECT __BISECT__
+#define SHSTEPS __SHSTEPS__
+#define AA __AA__
+#define OBJ __OBJ__
+#define BR __BR__
+__REFLECT__
+
+// ============ object fields ================================================
+
+// --- Mandelbulb potential (your kernel, acos clamped for NaN safety) --------
+float kernal(vec3 ver){
+   vec3 a;
+   float b,c,d,e;
+   a=ver;
+   for(int i=0;i<9;i++){
+       b=length(a);
+       c=atan(a.y,a.x)*8.0;
+       e=1.0/b;
+       d=acos(clamp(a.z/b, -1.0, 1.0))*8.0;
+       b=pow(b,8.0);
+       a=vec3(b*sin(d)*cos(c),b*sin(d)*sin(c),b*cos(d))+ver;
+       if(b>6.0){
+           break;
+       }
+   }
+   return 4.0-a.x*a.x-a.y*a.y-a.z*a.z;
+}
+
+// --- Quaternion Julia distance estimate ------------------------------------
+float qjulia(vec3 pos){
+  vec4 z = vec4(pos, 0.0);
+  vec4 c = vec4(-0.45, -0.30, -0.10, 0.20);
+  float md2 = 1.0;
+  float mz2 = dot(z, z);
+  for(int i = 0; i < 11; i++){
+    md2 *= 4.0 * mz2;
+    z = vec4(z.x*z.x - z.y*z.y - z.z*z.z - z.w*z.w,
+             2.0*z.x*z.y, 2.0*z.x*z.z, 2.0*z.x*z.w) + c;
+    mz2 = dot(z, z);
+    if(mz2 > 4.0) break;
+  }
+  return 0.25 * sqrt(mz2 / md2) * log(mz2);
+}
+
+// --- Mandelbox distance estimate (box-fold + sphere-fold) ------------------
+float mandelbox(vec3 p){
+  const float SCALE = 2.0;
+  const float MINRAD2 = 0.25;
+  vec4 scalevec = vec4(SCALE, SCALE, SCALE, abs(SCALE)) / MINRAD2;
+  float C1 = abs(SCALE - 1.0);
+  float C2 = pow(abs(SCALE), -7.0);
+  vec4 p4 = vec4(p, 1.0);
+  vec4 p0 = p4;
+  for(int i = 0; i < 8; i++){
+    p4.xyz = clamp(p4.xyz, -1.0, 1.0) * 2.0 - p4.xyz;      // box fold
+    float r2 = dot(p4.xyz, p4.xyz);
+    p4 *= clamp(max(MINRAD2 / r2, MINRAD2), 0.0, 1.0);      // sphere fold
+    p4 = p4 * scalevec + p0;
+  }
+  return (length(p4.xyz) - C1) / p4.w - C2;
+}
+
+#if OBJ == 0
+  #define POTENTIAL 1
+  float field(vec3 p){ return kernal(p); }
+#elif OBJ == 1
+  float field(vec3 p){ return qjulia(p); }
+#else
+  float field(vec3 p){ return mandelbox(p * 2.3) / 2.3; }
+#endif
+
+// ============ shared math ==================================================
+mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
+mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
+
+vec2 sphere(vec3 ro, vec3 rd, float R){
+  float b = dot(ro, rd);
+  float c = dot(ro, ro) - R * R;
+  float h = b * b - c;
+  if(h < 0.0) return vec2(-1.0);
+  h = sqrt(h);
+  return vec2(-b - h, -b + h);
+}
+
+vec3 calcNormal(vec3 p){
+  vec2 e = vec2(0.0009, 0.0);
+  vec3 g = vec3(
+    field(p + e.xyy) - field(p - e.xyy),
+    field(p + e.yxy) - field(p - e.yxy),
+    field(p + e.yyx) - field(p - e.yyx));
+  #ifdef POTENTIAL
+    return normalize(-g);          // potential grows inward
+  #else
+    return normalize(g);           // distance grows outward
+  #endif
+}
+
+float calcAO(vec3 p, vec3 n){
+  float occ = 0.0, sca = 1.0;
+  for(int i = 0; i < 5; i++){
+    float h = 0.01 + 0.12 * float(i);
+    #ifdef POTENTIAL
+      occ += clamp(field(p + n * h), 0.0, 1.0) * sca;
+    #else
+      occ += (h - field(p + n * h)) * sca;
+    #endif
+    sca *= 0.6;
+  }
+  #ifdef POTENTIAL
+    return clamp(1.0 - 0.9 * occ, 0.0, 1.0);
+  #else
+    return clamp(1.0 - 1.4 * occ, 0.0, 1.0);
+  #endif
+}
+
+#if SHSTEPS > 0
+float softShadow(vec3 p, vec3 l){
+  float res = 1.0;
+  float t = 0.02;
+  for(int i = 0; i < SHSTEPS; i++){
+    vec3 q = p + l * t;
+    if(dot(q, q) > BR * BR) break;
+    #ifdef POTENTIAL
+      float v = field(q);
+      if(v > 0.0) return 0.0;
+      res = min(res, 7.0 * (-v) / t);
+      t += 0.045;
+    #else
+      float d = field(q);
+      if(d < 0.0008) return 0.0;
+      res = min(res, 10.0 * d / t);
+      t += d;
+    #endif
+  }
+  return clamp(res, 0.0, 1.0);
+}
+#endif
+
+// ============ marching =====================================================
+bool raymarch(vec3 ro, vec3 rd, out float tOut){
+  vec2 bnd = sphere(ro, rd, BR);
+  if(bnd.y < 0.0) return false;
+  float t = max(bnd.x, 0.0);
+  float t1 = bnd.y;
+
+  #ifdef POTENTIAL
+    float dt = (t1 - t) / float(STEPS);
+    for(int i = 0; i < STEPS; i++){
+      t += dt;
+      if(t > t1) break;
+      if(field(ro + rd * t) > 0.0){
+        float lo = t - dt, hi = t;
+        for(int j = 0; j < BISECT; j++){
+          float m = 0.5 * (lo + hi);
+          if(field(ro + rd * m) > 0.0) hi = m; else lo = m;
+        }
+        tOut = hi; return true;
+      }
+    }
+    return false;
+  #else
+    for(int i = 0; i < STEPS; i++){
+      float d = field(ro + rd * t);
+      if(d < 0.0007){ tOut = t; return true; }
+      t += max(d * 0.9, 0.0006);
+      if(t > t1) break;
+    }
+    return false;
+  #endif
+}
+
+vec3 bg(vec2 uv){ return mix(vec3(0.015,0.02,0.035), vec3(0.0), length(uv)*0.7); }
+
+vec3 palette(vec3 pos){
+  #if OBJ == 0
+    return 0.5 + 0.5 * cos(6.2831 * (length(pos) * 1.4 + vec3(0.0, 0.33, 0.67)) + 1.0);
+  #elif OBJ == 1
+    return 0.5 + 0.5 * cos(6.2831 * (length(pos) * 1.7 + vec3(0.55, 0.42, 0.30)) + 0.4);
+  #else
+    return 0.5 + 0.5 * cos(6.2831 * (length(pos) * 1.3 + vec3(0.10, 0.30, 0.55)) + 2.4);
+  #endif
+}
+
+vec3 lighting(vec3 pos, vec3 nor, vec3 rd){
+  vec3 key  = normalize(vec3(0.6, 0.85, 0.55));
+  vec3 fill = normalize(vec3(-0.5, 0.2, -0.6));
+  float ao  = calcAO(pos, nor);
+  float sh  = 1.0;
+  #if SHSTEPS > 0
+    sh = softShadow(pos, key);
+  #endif
+  float dif = clamp(dot(nor, key), 0.0, 1.0) * sh;
+  float fil = clamp(dot(nor, fill), 0.0, 1.0);
+  float fre = pow(clamp(1.0 + dot(nor, rd), 0.0, 1.0), 3.0);
+  vec3  ref = reflect(rd, nor);
+  float spe = pow(clamp(dot(ref, key), 0.0, 1.0), 32.0) * sh;
+
+  vec3 base = palette(pos);
+  vec3 lin = vec3(0.0);
+  lin += 1.35 * dif * vec3(1.0, 0.85, 0.62);
+  lin += 0.30 * fil * vec3(0.35, 0.45, 0.65);
+  lin += 0.40 * vec3(0.28, 0.42, 0.68);
+  lin *= ao;
+  vec3 col = base * lin;
+  col += spe * ao;
+  col += fre * vec3(0.5, 0.7, 1.0) * 0.55;
+  return col;
+}
+
+vec3 render(vec2 uv, mat3 rot){
+  vec3 ro = rot * vec3(0.0, 0.0, u_dist);
+  vec3 rd = rot * normalize(vec3(uv, -1.8));
+  float t;
+  if(!raymarch(ro, rd, t)) return bg(uv);
+
+  vec3 pos = ro + rd * t;
+  vec3 nor = calcNormal(pos);
+  vec3 col = lighting(pos, nor, rd);
+
+  #ifdef REFLECT
+    float fres = pow(clamp(1.0 + dot(nor, rd), 0.0, 1.0), 3.0);
+    vec3 rrd = reflect(rd, nor);
+    vec3 rro = pos + nor * 0.01;
+    float t2;
+    if(raymarch(rro, rrd, t2)){
+      vec3 p2 = rro + rrd * t2;
+      vec3 n2 = calcNormal(p2);
+      col = mix(col, lighting(p2, n2, rrd), 0.35 * fres + 0.06);
+    } else {
+      col = mix(col, bg(uv) + 0.04, 0.22 * fres);
+    }
+  #endif
+
+  return col;
+}
+
+void main(){
+  mat3 rot = rotY(u_yaw) * rotX(u_pitch);
+  vec3 col = vec3(0.0);
+  for(int m = 0; m < AA; m++){
+    for(int n = 0; n < AA; n++){
+      vec2 o = (vec2(float(m), float(n)) + 0.5) / float(AA) - 0.5;
+      vec2 uv = (gl_FragCoord.xy + o - 0.5 * u_res) / u_res.y;
+      col += render(uv, rot);
+    }
+  }
+  col /= float(AA * AA);
+  col = pow(col, vec3(0.4545));
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// ---- objects & quality ----------------------------------------------------
+const OBJECTS = [
+  { name: 'BULB',   br: 1.35, dist: 2.6 },
+  { name: 'JULIA',  br: 1.90, dist: 2.9 },
+  { name: 'BOX',    br: 1.90, dist: 3.0 },
+];
+const PRESETS = [
+  { name: 'LOW',     steps: 90,  bisect: 5,  sh: 0,  aa: 1, dpr: 0.75 },
+  { name: 'MEDIUM',  steps: 140, bisect: 6,  sh: 0,  aa: 1, dpr: 1.0  },
+  { name: 'HIGH',    steps: 200, bisect: 7,  sh: 24, aa: 2, dpr: 1.0  },
+  { name: 'ULTRA',   steps: 256, bisect: 8,  sh: 32, aa: 2, dpr: 1.0  },
+  { name: 'INSANE',  steps: 320, bisect: 9,  sh: 40, aa: 3, dpr: 1.0  },
+  { name: 'EXTREME', steps: 512, bisect: 10, sh: 64, aa: 4, dpr: 1.0  },
+];
+let oi = 0, qi = 0, refl = false, autoRotate = true;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+let prog, uRes, uDist, uYaw, uPitch;
+const bufq = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, bufq);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+function buildProgram(){
+  const p = PRESETS[qi], o = OBJECTS[oi];
+  const src = FRAG
+    .replace('__STEPS__', p.steps)
+    .replace('__BISECT__', p.bisect)
+    .replace('__SHSTEPS__', p.sh)
+    .replace('__AA__', p.aa)
+    .replace('__OBJ__', oi)
+    .replace('__BR__', o.br.toFixed(2))
+    .replace('__REFLECT__', refl ? '#define REFLECT' : '');
+
+  if(prog) gl.deleteProgram(prog);
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, src));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  const loc = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  uRes   = gl.getUniformLocation(prog, 'u_res');
+  uDist  = gl.getUniformLocation(prog, 'u_dist');
+  uYaw   = gl.getUniformLocation(prog, 'u_yaw');
+  uPitch = gl.getUniformLocation(prog, 'u_pitch');
+
+  document.getElementById('loadv').textContent = (p.aa*p.aa) + ' spp' + (refl ? ' ×2' : '');
+}
+
+// ---- build UI -------------------------------------------------------------
+function buildSeg(wrapId, items, getIndex, onPick, extremeFlag){
+  const wrap = document.getElementById(wrapId);
+  wrap.innerHTML = '';
+  items.forEach((it, i) => {
+    const b = document.createElement('div');
+    b.className = 'btn' + (extremeFlag && it.name === 'EXTREME' ? ' extreme' : '') + (i === getIndex() ? ' active' : '');
+    b.textContent = it.name;
+    b.onclick = () => { onPick(i); [...wrap.children].forEach((c, k) => c.classList.toggle('active', k === i)); };
+    wrap.appendChild(b);
+  });
+}
+buildSeg('object', OBJECTS, () => oi, (i) => {
+  oi = i;
+  distTarget = OBJECTS[i].dist;
+  buildProgram();
+}, false);
+buildSeg('quality', PRESETS, () => qi, (i) => {
+  qi = i;
+  buildProgram();
+  resize();
+}, true);
+
+document.getElementById('refl').addEventListener('change', (e) => { refl = e.target.checked; buildProgram(); });
+document.getElementById('rot').addEventListener('change', (e) => { autoRotate = e.target.checked; });
+
+const panel = document.getElementById('panel');
+const showBtn = document.getElementById('show');
+document.getElementById('hide').onclick = () => { panel.style.display = 'none'; showBtn.style.display = 'block'; };
+showBtn.onclick = () => { panel.style.display = 'block'; showBtn.style.display = 'none'; };
+
+// ---- camera ---------------------------------------------------------------
+const MIN_DIST = 1.5, MAX_DIST = 7.0, PITCH_LIM = 1.45;
+let distTarget = OBJECTS[oi].dist, dist = distTarget;
+let yaw = 0.0, pitch = 0.35, yawT = 0.0, pitchT = 0.35;
+let dragging = false, lastX = 0, lastY = 0, lastInput = performance.now();
+
+function pDown(x, y){ dragging = true; lastX = x; lastY = y; lastInput = performance.now(); canvas.classList.add('drag'); }
+function pMove(x, y){
+  if(!dragging) return;
+  yawT   += (x - lastX) * 0.006;
+  pitchT += (y - lastY) * 0.006;
+  pitchT = Math.min(PITCH_LIM, Math.max(-PITCH_LIM, pitchT));
+  lastX = x; lastY = y; lastInput = performance.now();
+}
+function pUp(){ dragging = false; canvas.classList.remove('drag'); }
+
+canvas.addEventListener('mousedown', e => pDown(e.clientX, e.clientY));
+window.addEventListener('mousemove', e => pMove(e.clientX, e.clientY));
+window.addEventListener('mouseup', pUp);
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  distTarget *= Math.exp(e.deltaY * 0.0012);
+  distTarget = Math.min(MAX_DIST, Math.max(MIN_DIST, distTarget));
+}, { passive: false });
+
+let pinch0 = null;
+function td(t){ return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+canvas.addEventListener('touchstart', (e) => {
+  if(e.touches.length === 1) pDown(e.touches[0].clientX, e.touches[0].clientY);
+  else if(e.touches.length === 2){ dragging = false; pinch0 = { d: td(e.touches), dist: distTarget }; }
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if(e.touches.length === 1) pMove(e.touches[0].clientX, e.touches[0].clientY);
+  else if(e.touches.length === 2 && pinch0){
+    distTarget = Math.min(MAX_DIST, Math.max(MIN_DIST, pinch0.dist * (pinch0.d / td(e.touches))));
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', () => { pUp(); pinch0 = null; }, { passive: false });
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, PRESETS[qi].dpr);
+  canvas.width  = Math.floor(window.innerWidth  * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+
+// ---- loop -----------------------------------------------------------------
+buildProgram();
+resize();
+
+const fpsEl = document.getElementById('fpsv');
+let last = performance.now(), fpsAcc = 0, fpsN = 0, fpsTimer = 0;
+
+function frame(){
+  const now = performance.now();
+  const dtf = Math.min((now - last) / 1000, 0.05);
+  last = now;
+
+  fpsAcc += 1 / Math.max(dtf, 1e-4); fpsN++; fpsTimer += dtf;
+  if(fpsTimer > 0.4){ fpsEl.textContent = Math.round(fpsAcc / fpsN); fpsAcc = 0; fpsN = 0; fpsTimer = 0; }
+
+  if(autoRotate && !dragging && now - lastInput > 600) yawT += 0.12 * dtf;
+  yaw   += (yawT - yaw) * 0.15;
+  pitch += (pitchT - pitch) * 0.15;
+  dist  += (distTarget - dist) * 0.12;
+
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uDist, dist);
+  gl.uniform1f(uYaw, yaw);
+  gl.uniform1f(uPitch, pitch);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
